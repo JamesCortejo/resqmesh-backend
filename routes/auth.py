@@ -1,4 +1,8 @@
+import os
 import bcrypt
+import hashlib
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import (
@@ -20,6 +24,30 @@ def normalize_hash(value):
     if isinstance(value, bytes):
         value = value.decode("utf-8")
     return str(value)
+
+
+def decrypt_aes(encrypted_value: str) -> str | None:
+    """Decrypt AES-CBC encrypted value stored as hex_iv:hex_ciphertext."""
+    try:
+        if not encrypted_value or ":" not in encrypted_value:
+            return None
+
+        encryption_key = os.getenv("ENCRYPTION_KEY", "")
+        if not encryption_key:
+            return None
+
+        # Derive a 32-byte key from the ENCRYPTION_KEY string
+        key = hashlib.sha256(encryption_key.encode("utf-8")).digest()
+
+        iv_hex, ciphertext_hex = encrypted_value.split(":", 1)
+        iv = bytes.fromhex(iv_hex)
+        ciphertext = bytes.fromhex(ciphertext_hex)
+
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        return decrypted.decode("utf-8")
+    except Exception:
+        return None
 
 
 @auth_bp.route("/rescuer/login", methods=["POST"])
@@ -114,9 +142,9 @@ def rescuer_login():
                 "role": role,
                 "team_id": team_id,
                 "team_name": team_name,
-                "phone": phone_encrypted,
+                "phone": decrypt_aes(phone_encrypted),
                 "age": age,
-                "address": address_encrypted,
+                "address": decrypt_aes(address_encrypted),
                 "occupation": occupation,
                 "password_hash": password_hash,
             }

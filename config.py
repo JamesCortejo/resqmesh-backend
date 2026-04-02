@@ -8,3 +8,4 @@ class Config:
     JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=int(os.getenv("JWT_EXPIRES_HOURS", "24")))
     DATABASE_URL = os.getenv("DATABASE_URL")
+    ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
