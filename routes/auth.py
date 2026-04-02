@@ -3,7 +3,7 @@ import bcrypt
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import (
     create_access_token,
-    get_jwt_identity,
+    get_jwt,
     jwt_required,
 )
 
@@ -45,11 +45,16 @@ def rescuer_login():
 
         cur.execute(
             """
-            SELECT id, code, first_name, middle_name, last_name, role, team_id, password_hash
-            FROM users
-            WHERE code = %s
-              AND role = 'rescuer'
-              AND deleted = FALSE
+            SELECT
+                u.id, u.code, u.first_name, u.middle_name, u.last_name,
+                u.role, u.team_id, u.password_hash,
+                u.phone_encrypted, u.age, u.address_encrypted, u.occupation,
+                rt.name AS team_name
+            FROM users u
+            LEFT JOIN rescue_teams rt ON rt.id = u.team_id
+            WHERE u.code = %s
+              AND u.role = 'rescuer'
+              AND u.deleted = FALSE
             LIMIT 1
             """,
             (code,)
@@ -60,7 +65,13 @@ def rescuer_login():
         if not row:
             return jsonify({"error": "Invalid credentials"}), 401
 
-        user_id, user_code, first_name, middle_name, last_name, role, team_id, password_hash = row
+        (
+            user_id, user_code, first_name, middle_name, last_name,
+            role, team_id, password_hash,
+            phone_encrypted, age, address_encrypted, occupation,
+            team_name
+        ) = row
+
         password_hash = normalize_hash(password_hash)
 
         if not password_hash:
@@ -70,12 +81,9 @@ def rescuer_login():
             return jsonify({"error": "Invalid credentials"}), 401
 
         access_token = create_access_token(
-            identity={
-                "user_id": user_id,
-                "code": user_code,
-                "role": role,
-            },
+            identity=str(user_id),
             additional_claims={
+                "user_id": user_id,
                 "code": user_code,
                 "role": role,
             }
@@ -105,7 +113,12 @@ def rescuer_login():
                 "last_name": last_name,
                 "role": role,
                 "team_id": team_id,
-                "password_hash": password_hash
+                "team_name": team_name,
+                "phone": phone_encrypted,
+                "age": age,
+                "address": address_encrypted,
+                "occupation": occupation,
+                "password_hash": password_hash,
             }
         }), 200
 
@@ -131,8 +144,8 @@ def logout():
     cur = None
 
     try:
-        identity = get_jwt_identity() or {}
-        user_id = identity.get("user_id")
+        claims = get_jwt()
+        user_id = claims.get("user_id")
 
         if not user_id:
             return jsonify({"error": "Invalid token"}), 401
@@ -141,13 +154,9 @@ def logout():
         cur = conn.cursor()
 
         cur.execute(
-            """
-            DELETE FROM rescuer_sessions
-            WHERE rescuer_id = %s
-            """,
+            "DELETE FROM rescuer_sessions WHERE rescuer_id = %s",
             (user_id,)
         )
-
         conn.commit()
 
         return jsonify({"message": "Logged out successfully"}), 200
