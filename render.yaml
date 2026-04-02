@@ -2,5 +2,5 @@ services:
   - type: web
     name: resqmesh-api
     env: python
-    buildCommand: ""
+    buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
