@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
+from flask_jwt_extended import jwt_required, get_jwt
 from db import get_db_connection
 
 locations_bp = Blueprint("locations", __name__)
@@ -9,8 +9,8 @@ locations_bp = Blueprint("locations", __name__)
 @jwt_required()
 def update_location():
     """
-    Store current GPS location of the authenticated user (rescuer or civilian).
-    Request body: { "latitude": float, "longitude": float, "node_id": str (optional) }
+    Store current GPS location of the authenticated rescuer.
+    Inserts a new row each time (keeps full history).
     """
     conn = None
     cur = None
@@ -26,7 +26,7 @@ def update_location():
         if lat is None or lng is None:
             return jsonify({"error": "latitude and longitude required"}), 400
 
-        node_id = data.get("node_id")  # optional: which mesh node they are connected to
+        node_id = data.get("node_id")
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -48,12 +48,10 @@ def update_location():
             conn.close()
 
 
+# Keep the GET endpoints unchanged
 @locations_bp.route("/location/rescuer/<int:rescuer_id>", methods=["GET"])
 @jwt_required()
 def get_rescuer_location(rescuer_id):
-    """
-    Get the most recent location of a specific rescuer.
-    """
     conn = None
     cur = None
     try:
@@ -77,7 +75,6 @@ def get_rescuer_location(rescuer_id):
             "longitude": float(lng),
             "recorded_at": recorded_at.isoformat()
         }), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -90,9 +87,6 @@ def get_rescuer_location(rescuer_id):
 @locations_bp.route("/location/team/<int:team_id>", methods=["GET"])
 @jwt_required()
 def get_team_location(team_id):
-    """
-    Get the most recent location of any rescuer belonging to a rescue team.
-    """
     conn = None
     cur = None
     try:
@@ -118,7 +112,6 @@ def get_team_location(team_id):
             "longitude": float(lng),
             "recorded_at": recorded_at.isoformat()
         }), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
