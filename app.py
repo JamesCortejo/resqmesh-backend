@@ -4,6 +4,7 @@ from flask_cors import CORS
 from config import Config
 from extensions import jwt
 from routes.auth import auth_bp
+from routes.nodes import nodes_bp
 
 
 def create_app():
@@ -14,6 +15,9 @@ def create_app():
     jwt.init_app(app)
 
     app.register_blueprint(auth_bp, url_prefix="/auth")
+
+    app.register_blueprint(nodes_bp, url_prefix="/api")
+    
 
     @app.route("/", methods=["GET"])
     def home():
