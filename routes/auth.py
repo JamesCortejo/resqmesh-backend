@@ -7,6 +7,7 @@ from Crypto.Util.Padding import unpad
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import (
     create_access_token,
+    decode_token,
     get_jwt,
     jwt_required,
 )
@@ -36,7 +37,6 @@ def decrypt_aes(encrypted_value: str) -> str | None:
         if not encryption_key_b64:
             return None
 
-        # Decode the base64 key directly — matches how the admin script encrypts
         key = base64.urlsafe_b64decode(encryption_key_b64)
 
         iv_hex, ciphertext_hex = encrypted_value.split(":", 1)
@@ -60,7 +60,7 @@ def rescuer_login():
 
         code = (data.get("code") or "").strip()
         password = data.get("password") or ""
-        node_id = data.get("nodeId")
+        node_id = (data.get("nodeId") or "").strip()
 
         if not code or not password:
             return jsonify({
@@ -108,28 +108,42 @@ def rescuer_login():
         if not bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8")):
             return jsonify({"error": "Invalid credentials"}), 401
 
+        resolved_node_id = node_id or "CLOUD"
+
         access_token = create_access_token(
             identity=str(user_id),
             additional_claims={
                 "user_id": user_id,
                 "code": user_code,
                 "role": role,
+                "node_id": resolved_node_id,
             }
         )
 
-        if node_id is not None:
-            cur.execute(
-                """
-                INSERT INTO rescuer_sessions (rescuer_id, node_id, last_seen_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (rescuer_id)
-                DO UPDATE SET
-                    node_id = EXCLUDED.node_id,
-                    last_seen_at = NOW()
-                """,
-                (user_id, node_id)
+        decoded = decode_token(access_token)
+        jwt_jti = decoded["jti"]
+
+        cur.execute(
+            """
+            INSERT INTO rescuer_sessions (
+                rescuer_id,
+                node_id,
+                jwt_jti,
+                logged_in_at,
+                last_seen_at
             )
-            conn.commit()
+            VALUES (%s, %s, %s, NOW(), NOW())
+            ON CONFLICT (rescuer_id)
+            DO UPDATE SET
+                node_id = EXCLUDED.node_id,
+                jwt_jti = EXCLUDED.jwt_jti,
+                logged_in_at = EXCLUDED.logged_in_at,
+                last_seen_at = EXCLUDED.last_seen_at
+            """,
+            (user_id, resolved_node_id, jwt_jti)
+        )
+
+        conn.commit()
 
         return jsonify({
             "access_token": access_token,
