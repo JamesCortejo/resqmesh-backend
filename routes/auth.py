@@ -37,7 +37,7 @@ def decrypt_aes(encrypted_value: str) -> str | None:
             return None
 
         # Decode the base64 key directly — matches how the admin script encrypts
-        key = base64.b64decode(encryption_key_b64)
+        key = base64.urlsafe_b64decode(encryption_key_b64)
 
         iv_hex, ciphertext_hex = encrypted_value.split(":", 1)
         iv = bytes.fromhex(iv_hex)
