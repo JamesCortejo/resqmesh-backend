@@ -1,6 +1,6 @@
 import os
+import base64
 import bcrypt
-import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
@@ -32,12 +32,12 @@ def decrypt_aes(encrypted_value: str) -> str | None:
         if not encrypted_value or ":" not in encrypted_value:
             return None
 
-        encryption_key = os.getenv("ENCRYPTION_KEY", "")
-        if not encryption_key:
+        encryption_key_b64 = os.getenv("ENCRYPTION_KEY", "")
+        if not encryption_key_b64:
             return None
 
-        # Derive a 32-byte key from the ENCRYPTION_KEY string
-        key = hashlib.sha256(encryption_key.encode("utf-8")).digest()
+        # Decode the base64 key directly — matches how the admin script encrypts
+        key = base64.b64decode(encryption_key_b64)
 
         iv_hex, ciphertext_hex = encrypted_value.split(":", 1)
         iv = bytes.fromhex(iv_hex)
