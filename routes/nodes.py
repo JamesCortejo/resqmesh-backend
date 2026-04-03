@@ -1,18 +1,21 @@
 from flask import Blueprint, jsonify, request
 from db import get_db_connection
-from datetime import datetime, timedelta
 
 nodes_bp = Blueprint("nodes", __name__)
 
 # Nodes are considered inactive if last_seen is older than 3 minutes (180 seconds)
 INACTIVE_SECONDS = 180
 
+# Distress signals older than this are considered stale (in seconds)
+DISTRESS_ACTIVE_SECONDS = 3600   # 1 hour
+
 
 @nodes_bp.route("/nodes", methods=["GET"])
 def get_nodes():
     """
     Returns all non-deleted nodes with additional fields:
-    - distress: boolean (true if there is an active distress signal for this node)
+    - distress: boolean (true if there is an active distress signal for this node
+                 that is younger than DISTRESS_ACTIVE_SECONDS)
     - status: 'distress', 'online', or 'inactive' (based on last_seen)
     """
     conn = None
@@ -21,7 +24,7 @@ def get_nodes():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Query that joins with active distress signals
+        # Query that joins with recent active distress signals
         query = """
             SELECT
                 n.node_id,
@@ -40,12 +43,14 @@ def get_nodes():
             LEFT JOIN (
                 SELECT node_id, COUNT(*) AS active_count
                 FROM distress_signals
-                WHERE status = 'active' AND deleted = FALSE
+                WHERE status = 'active'
+                  AND deleted = FALSE
+                  AND timestamp > NOW() - INTERVAL '%s seconds'
                 GROUP BY node_id
             ) d ON n.node_id = d.node_id
             WHERE n.deleted = FALSE
         """
-        cur.execute(query, (INACTIVE_SECONDS,))
+        cur.execute(query, (INACTIVE_SECONDS, DISTRESS_ACTIVE_SECONDS))
         rows = cur.fetchall()
 
         nodes = []
@@ -60,7 +65,7 @@ def get_nodes():
                 "users": users_connected or 0,
                 "distress": distress,          # boolean
                 "status": status,              # "distress", "online", "inactive"
-                "signal": None                 # not used in cloud mode
+                "signal": None
             })
         return jsonify(nodes), 200
 
@@ -76,8 +81,8 @@ def get_nodes():
 @nodes_bp.route("/node/<node_id>/distress", methods=["GET"])
 def get_node_distress(node_id):
     """
-    Returns the most recent active distress signal for a given node.
-    Used by the frontend to show the distress details card.
+    Returns the most recent active distress signal for a given node,
+    but only if it is younger than DISTRESS_ACTIVE_SECONDS.
     """
     conn = None
     cur = None
@@ -85,20 +90,22 @@ def get_node_distress(node_id):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Fetch the latest active distress for this node
         cur.execute("""
             SELECT
                 id, code, reason, latitude, longitude, timestamp, status, priority,
                 user_code, first_name, last_name, phone, blood_type, age
             FROM distress_signals
-            WHERE node_id = %s AND status = 'active' AND deleted = FALSE
+            WHERE node_id = %s
+              AND status = 'active'
+              AND deleted = FALSE
+              AND timestamp > NOW() - INTERVAL '%s seconds'
             ORDER BY timestamp DESC
             LIMIT 1
-        """, (node_id,))
+        """, (node_id, DISTRESS_ACTIVE_SECONDS))
 
         row = cur.fetchone()
         if not row:
-            return jsonify({"error": "No active distress for this node"}), 404
+            return jsonify({"error": "No recent active distress for this node"}), 404
 
         (id, code, reason, lat, lng, ts, status, priority,
          user_code, first_name, last_name, phone, blood_type, age) = row
@@ -118,8 +125,8 @@ def get_node_distress(node_id):
                 "phone": phone,
                 "bloodType": blood_type,
                 "age": age,
-                "occupation": "",   # optional – not stored in distress_signals
-                "address": ""       # optional – not stored here
+                "occupation": "",
+                "address": ""
             }
         }), 200
 
@@ -136,7 +143,6 @@ def get_node_distress(node_id):
 def node_heartbeat(node_id):
     """
     Updates the last_seen timestamp of a node to keep it 'online'.
-    Mesh nodes should call this endpoint every minute or so.
     """
     conn = None
     cur = None
