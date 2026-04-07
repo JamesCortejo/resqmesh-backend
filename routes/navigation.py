@@ -1,3 +1,4 @@
+# navigation.py
 import os
 from typing import Any
 
@@ -31,7 +32,7 @@ def get_live_rescuer_route():
 
     Flow:
     1) Find the rescuer from JWT
-    2) Find the rescuer's latest active assignment
+    2) Find the rescuer's latest active assignment (direct or via team)
     3) Find the rescuer's latest GPS location
     4) Call OpenRouteService for the driving route
     5) Return route geometry and summary data
@@ -51,6 +52,17 @@ def get_live_rescuer_route():
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # Get rescuer's team_id first
+        cur.execute(
+            "SELECT team_id FROM users WHERE id = %s AND role = 'rescuer'",
+            (user_id,)
+        )
+        user_row = cur.fetchone()
+        if not user_row:
+            return jsonify({"error": "Rescuer not found"}), 404
+        team_id = user_row[0]
+
+        # Find active assignment (direct or via team)
         cur.execute(
             """
             SELECT
@@ -74,13 +86,13 @@ def get_live_rescuer_route():
                 ds.age
             FROM assignments a
             JOIN distress_signals ds ON ds.id = a.distress_id
-            WHERE a.rescuer_id = %s
+            WHERE (a.rescuer_id = %s OR a.team_id = %s)
               AND a.deleted = FALSE
               AND a.status IN ('assigned', 'en_route')
             ORDER BY a.assigned_at DESC
             LIMIT 1
             """,
-            (user_id,),
+            (user_id, team_id),
         )
         assignment = cur.fetchone()
 
@@ -90,7 +102,7 @@ def get_live_rescuer_route():
         (
             assignment_id,
             distress_id,
-            team_id,
+            assign_team_id,
             rescuer_id,
             assigned_at,
             eta_minutes,
@@ -108,6 +120,7 @@ def get_live_rescuer_route():
             age,
         ) = assignment
 
+        # Get rescuer's latest location
         cur.execute(
             """
             SELECT latitude, longitude, recorded_at
@@ -128,6 +141,7 @@ def get_live_rescuer_route():
         if dest_lat is None or dest_lng is None:
             return jsonify({"error": "Destination coordinates not found"}), 400
 
+        # Call OpenRouteService
         ors_payload = {
             "coordinates": [
                 [float(start_lng), float(start_lat)],
@@ -190,10 +204,10 @@ def get_live_rescuer_route():
                 "assignment": {
                     "id": assignment_id,
                     "distress_id": distress_id,
-                    "team_id": team_id,
+                    "team_id": assign_team_id,
                     "rescuer_id": rescuer_id,
                     "assigned_at": assigned_at.isoformat() if assigned_at else None,
-                    "eta_minutes": eta_minutes if eta_minutes is not None else eta_minutes,
+                    "eta_minutes": eta_minutes,
                     "status": assignment_status,
                     "distress": {
                         "code": distress_code,
