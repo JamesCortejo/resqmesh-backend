@@ -1,0 +1,236 @@
+import os
+from typing import Any
+
+import requests
+from flask import Blueprint, jsonify
+from flask_jwt_extended import get_jwt, jwt_required
+
+from db import get_db_connection
+
+navigation_bp = Blueprint("navigation", __name__)
+
+ORS_API_KEY = os.getenv("ORS_API_KEY", "")
+ORS_PROFILE = os.getenv("ORS_PROFILE", "driving-car")
+ORS_TIMEOUT_SECONDS = int(os.getenv("ORS_TIMEOUT_SECONDS", "15"))
+
+
+def _to_float(value: Any):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@navigation_bp.route("/rescuer/route/live", methods=["GET"])
+@jwt_required()
+def get_live_rescuer_route():
+    """
+    Returns the current rescuer's active assignment route and ETA.
+
+    Flow:
+    1) Find the rescuer from JWT
+    2) Find the rescuer's latest active assignment
+    3) Find the rescuer's latest GPS location
+    4) Call OpenRouteService for the driving route
+    5) Return route geometry and summary data
+    """
+    conn = None
+    cur = None
+
+    try:
+        claims = get_jwt()
+        user_id = claims.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Invalid token"}), 401
+
+        if not ORS_API_KEY:
+            return jsonify({"error": "ORS_API_KEY is not configured"}), 500
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                a.id,
+                a.distress_id,
+                a.team_id,
+                a.rescuer_id,
+                a.assigned_at,
+                a.eta_minutes,
+                a.status,
+                ds.code,
+                ds.reason,
+                ds.latitude,
+                ds.longitude,
+                ds.timestamp,
+                ds.priority,
+                ds.first_name,
+                ds.last_name,
+                ds.phone,
+                ds.blood_type,
+                ds.age
+            FROM assignments a
+            JOIN distress_signals ds ON ds.id = a.distress_id
+            WHERE a.rescuer_id = %s
+              AND a.deleted = FALSE
+              AND a.status IN ('assigned', 'en_route')
+            ORDER BY a.assigned_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        assignment = cur.fetchone()
+
+        if not assignment:
+            return jsonify({"error": "No active assignment found"}), 404
+
+        (
+            assignment_id,
+            distress_id,
+            team_id,
+            rescuer_id,
+            assigned_at,
+            eta_minutes,
+            assignment_status,
+            distress_code,
+            reason,
+            dest_lat,
+            dest_lng,
+            distress_timestamp,
+            priority,
+            first_name,
+            last_name,
+            phone,
+            blood_type,
+            age,
+        ) = assignment
+
+        cur.execute(
+            """
+            SELECT latitude, longitude, recorded_at
+            FROM rescuer_locations
+            WHERE rescuer_id = %s
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        )
+        location = cur.fetchone()
+
+        if not location:
+            return jsonify({"error": "Rescuer location not found"}), 400
+
+        start_lat, start_lng, recorded_at = location
+
+        if dest_lat is None or dest_lng is None:
+            return jsonify({"error": "Destination coordinates not found"}), 400
+
+        ors_payload = {
+            "coordinates": [
+                [float(start_lng), float(start_lat)],
+                [float(dest_lng), float(dest_lat)],
+            ]
+        }
+
+        ors_response = requests.post(
+            f"https://api.openrouteservice.org/v2/directions/{ORS_PROFILE}/geojson",
+            json=ors_payload,
+            headers={
+                "Authorization": ORS_API_KEY,
+                "Content-Type": "application/json",
+            },
+            timeout=ORS_TIMEOUT_SECONDS,
+        )
+
+        if ors_response.status_code != 200:
+            return (
+                jsonify(
+                    {
+                        "error": "ORS request failed",
+                        "details": ors_response.text,
+                    }
+                ),
+                502,
+            )
+
+        ors_data = ors_response.json()
+        features = ors_data.get("features") or []
+        if not features:
+            return (
+                jsonify(
+                    {
+                        "error": "ORS returned no route",
+                        "details": ors_data,
+                    }
+                ),
+                502,
+            )
+
+        feature = features[0]
+        properties = feature.get("properties") or {}
+        summary = properties.get("summary") or {}
+        geometry = feature.get("geometry") or {}
+        route_coordinates = geometry.get("coordinates") or []
+
+        distance_m = summary.get("distance")
+        duration_s = summary.get("duration")
+
+        eta_minutes = None
+        if duration_s is not None:
+            try:
+                eta_minutes = max(1, int(round(float(duration_s) / 60.0)))
+            except (TypeError, ValueError):
+                eta_minutes = None
+
+        return jsonify(
+            {
+                "assignment": {
+                    "id": assignment_id,
+                    "distress_id": distress_id,
+                    "team_id": team_id,
+                    "rescuer_id": rescuer_id,
+                    "assigned_at": assigned_at.isoformat() if assigned_at else None,
+                    "eta_minutes": eta_minutes if eta_minutes is not None else eta_minutes,
+                    "status": assignment_status,
+                    "distress": {
+                        "code": distress_code,
+                        "reason": reason,
+                        "latitude": _to_float(dest_lat),
+                        "longitude": _to_float(dest_lng),
+                        "timestamp": distress_timestamp.isoformat() if distress_timestamp else None,
+                        "priority": priority,
+                        "user": {
+                            "firstName": first_name,
+                            "lastName": last_name,
+                            "phone": phone,
+                            "bloodType": blood_type,
+                            "age": age,
+                        },
+                    },
+                },
+                "rescuer_location": {
+                    "latitude": _to_float(start_lat),
+                    "longitude": _to_float(start_lng),
+                    "recorded_at": recorded_at.isoformat() if recorded_at else None,
+                },
+                "route": {
+                    "distance_m": distance_m,
+                    "duration_s": duration_s,
+                    "eta_minutes": eta_minutes,
+                    "coordinates": route_coordinates,
+                },
+            }
+        ), 200
+
+    except requests.RequestException as e:
+        return jsonify({"error": "Failed to reach ORS", "details": str(e)}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()

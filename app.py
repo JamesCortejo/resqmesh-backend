@@ -6,7 +6,8 @@ from extensions import jwt
 from routes.auth import auth_bp
 from routes.nodes import nodes_bp
 from routes.locations import locations_bp
-from routes.assignments import assignments_bp   # <-- NEW
+from routes.assignments import assignments_bp
+from routes.navigation import navigation_bp
 
 
 def create_app():
@@ -19,7 +20,8 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(nodes_bp, url_prefix="/api")
     app.register_blueprint(locations_bp, url_prefix="/api")
-    app.register_blueprint(assignments_bp, url_prefix="/api")   # <-- NEW
+    app.register_blueprint(assignments_bp, url_prefix="/api")
+    app.register_blueprint(navigation_bp, url_prefix="/api")
 
     @app.route("/", methods=["GET"])
     def home():
@@ -35,4 +37,8 @@ def create_app():
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(__import__("os").environ.get("PORT", "5000")), debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(__import__("os").environ.get("PORT", "5000")),
+        debug=True,
+    )
