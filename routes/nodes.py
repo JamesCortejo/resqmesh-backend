@@ -24,7 +24,7 @@ def get_nodes():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Query that joins with recent active distress signals
+        # Query that joins with recent active distress signals using origin_node_id
         query = """
             SELECT
                 n.node_id,
@@ -41,13 +41,13 @@ def get_nodes():
                 END AS computed_status
             FROM nodes n
             LEFT JOIN (
-                SELECT node_id, COUNT(*) AS active_count
+                SELECT origin_node_id, COUNT(*) AS active_count
                 FROM distress_signals
                 WHERE status = 'active'
                   AND deleted = FALSE
                   AND timestamp > NOW() - INTERVAL '%s seconds'
-                GROUP BY node_id
-            ) d ON n.node_id = d.node_id
+                GROUP BY origin_node_id
+            ) d ON n.node_id = d.origin_node_id
             WHERE n.deleted = FALSE
         """
         cur.execute(query, (INACTIVE_SECONDS, DISTRESS_ACTIVE_SECONDS))
@@ -95,7 +95,7 @@ def get_node_distress(node_id):
                 id, code, reason, latitude, longitude, timestamp, status, priority,
                 user_code, first_name, last_name, phone, blood_type, age
             FROM distress_signals
-            WHERE node_id = %s
+            WHERE origin_node_id = %s
               AND status = 'active'
               AND deleted = FALSE
               AND timestamp > NOW() - INTERVAL '%s seconds'
