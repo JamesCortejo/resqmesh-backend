@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from db import get_db_connection
+import json
 
 assignments_bp = Blueprint("assignments", __name__)
 
@@ -96,7 +97,7 @@ def get_rescuer_assignments():
 @assignments_bp.route("/assignment/<int:assignment_id>/resolve", methods=["POST"])
 @jwt_required()
 def resolve_assignment(assignment_id):
-    """Mark an assignment as resolved."""
+    """Mark an assignment as resolved and queue a mesh command."""
     conn = None
     cur = None
     try:
@@ -108,31 +109,54 @@ def resolve_assignment(assignment_id):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Verify that the assignment belongs to the rescuer's team or directly to the rescuer
+        # Verify assignment ownership and get distress details
         cur.execute("""
-            SELECT a.team_id, a.rescuer_id, u.team_id as rescuer_team_id
+            SELECT a.team_id, a.rescuer_id, u.team_id as rescuer_team_id,
+                   a.distress_id, ds.origin_node_id, ds.origin_distress_id
             FROM assignments a
             JOIN users u ON u.id = %s
+            JOIN distress_signals ds ON ds.id = a.distress_id
             WHERE a.id = %s AND a.deleted = FALSE
         """, (user_id, assignment_id))
         row = cur.fetchone()
         if not row:
             return jsonify({"error": "Assignment not found"}), 404
 
-        assign_team_id, assign_rescuer_id, rescuer_team_id = row
+        assign_team_id, assign_rescuer_id, rescuer_team_id, distress_id, origin_node_id, origin_distress_id = row
         if assign_rescuer_id != user_id and assign_team_id != rescuer_team_id:
             return jsonify({"error": "Unauthorized"}), 403
 
+        # Update assignment status
         cur.execute("""
             UPDATE assignments
             SET status = 'resolved', updated_at = NOW()
             WHERE id = %s
         """, (assignment_id,))
+
+        # Update distress signal status
+        cur.execute("""
+            UPDATE distress_signals
+            SET status = 'resolved', updated_at = NOW()
+            WHERE id = %s
+        """, (distress_id,))
+
+        # Insert mesh command for the origin node
+        payload = json.dumps({
+            "distress_id": distress_id,
+            "origin_distress_id": origin_distress_id
+        })
+        cur.execute("""
+            INSERT INTO mesh_commands (target_node_id, command_type, payload)
+            VALUES (%s, 'resolve_distress', %s)
+        """, (origin_node_id, payload))
+
         conn.commit()
 
-        return jsonify({"message": "Assignment resolved"}), 200
+        return jsonify({"message": "Assignment resolved and mesh command queued."}), 200
 
     except Exception as e:
+        if conn:
+            conn.rollback()
         return jsonify({"error": str(e)}), 500
     finally:
         if cur:
