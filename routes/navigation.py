@@ -29,6 +29,7 @@ def _to_float(value: Any):
 def get_live_rescuer_route():
     """
     Returns the current rescuer's active assignment route and ETA.
+    Also persists the calculated ETA in the assignments table for offline civilian use.
     """
     conn = None
     cur = None
@@ -98,7 +99,7 @@ def get_live_rescuer_route():
             assign_team_id,
             rescuer_id,
             assigned_at,
-            eta_minutes,
+            eta_minutes_db,
             assignment_status,
             distress_code,
             reason,
@@ -191,6 +192,16 @@ def get_live_rescuer_route():
                 eta_minutes = max(1, int(round(float(duration_s) / 60.0)))
             except (TypeError, ValueError):
                 eta_minutes = None
+
+        # ✅ PERSIST THE CALCULATED ETA IN THE DATABASE
+        if eta_minutes is not None:
+            cur.execute("""
+                UPDATE assignments
+                SET eta_minutes = %s, updated_at = NOW()
+                WHERE id = %s
+            """, (eta_minutes, assignment_id))
+            conn.commit()
+            # Refresh the cursor for subsequent queries if needed (not required here)
 
         return jsonify(
             {
