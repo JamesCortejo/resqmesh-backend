@@ -1,6 +1,5 @@
-# navigation.py
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional, Tuple, List
 
 import requests
 from flask import Blueprint, jsonify
@@ -24,21 +23,95 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
-def _calculate_eta_minutes(duration_s: Any) -> Optional[int]:
+def _eta_minutes_from_duration(duration_s: Any) -> Optional[int]:
+    if duration_s is None:
+        return None
     try:
-        if duration_s is None:
-            return None
         return max(1, int(round(float(duration_s) / 60.0)))
     except (TypeError, ValueError):
         return None
 
 
-def _call_ors_route(
+def _shape_response(
+    assignment_row,
+    location_row: Optional[Tuple[Any, Any, Any]],
+    route_coordinates: List[List[float]],
+    distance_m: Optional[float],
+    duration_s: Optional[float],
+    eta_minutes: Optional[int],
+):
+    (
+        assignment_id,
+        distress_id,
+        assign_team_id,
+        rescuer_id,
+        assigned_at,
+        eta_minutes_db,
+        assignment_status,
+        distress_code,
+        reason,
+        dest_lat,
+        dest_lng,
+        distress_timestamp,
+        priority,
+        first_name,
+        last_name,
+        phone,
+        blood_type,
+        age,
+    ) = assignment_row
+
+    start_lat = None
+    start_lng = None
+    recorded_at = None
+    if location_row:
+        start_lat, start_lng, recorded_at = location_row
+
+    return {
+        "assignment": {
+            "id": assignment_id,
+            "distress_id": distress_id,
+            "team_id": assign_team_id,
+            "rescuer_id": rescuer_id,
+            "assigned_at": assigned_at.isoformat() if assigned_at else None,
+            "eta_minutes": eta_minutes if eta_minutes is not None else eta_minutes_db,
+            "status": assignment_status,
+            "distress": {
+                "code": distress_code,
+                "reason": reason,
+                "latitude": _to_float(dest_lat),
+                "longitude": _to_float(dest_lng),
+                "timestamp": distress_timestamp.isoformat() if distress_timestamp else None,
+                "priority": priority,
+                "user": {
+                    "firstName": first_name,
+                    "lastName": last_name,
+                    "phone": phone,
+                    "bloodType": blood_type,
+                    "age": age,
+                },
+            },
+        },
+        "rescuer_location": {
+            "latitude": _to_float(start_lat),
+            "longitude": _to_float(start_lng),
+            "recorded_at": recorded_at.isoformat() if recorded_at else None,
+        },
+        "route": {
+            "distance_m": distance_m,
+            "duration_s": duration_s,
+            "eta_minutes": eta_minutes,
+            "coordinates": route_coordinates,
+        },
+    }
+
+
+def _route_from_ors(
     start_lat: float,
     start_lng: float,
     dest_lat: float,
     dest_lng: float,
-) -> Tuple[Optional[List[List[float]]], Optional[float], Optional[float], Optional[int], Optional[str]]:
+):
     if not ORS_API_KEY:
         return None, None, None, None, "ORS_API_KEY is not configured"
 
@@ -76,174 +149,16 @@ def _call_ors_route(
     geometry = feature.get("geometry") or {}
     route_coordinates = geometry.get("coordinates") or []
 
-    distance_m = summary.get("distance")
-    duration_s = summary.get("duration")
-    eta_minutes = _calculate_eta_minutes(duration_s)
+    distance_m = _to_float(summary.get("distance"))
+    duration_s = _to_float(summary.get("duration"))
+    eta_minutes = _eta_minutes_from_duration(duration_s)
 
     return route_coordinates, distance_m, duration_s, eta_minutes, None
-
-
-def _fetch_active_assignment_for_rescuer(cur, user_id: int, team_id: int):
-    cur.execute(
-        """
-        SELECT
-            a.id,
-            a.distress_id,
-            a.team_id,
-            a.rescuer_id,
-            a.assigned_at,
-            a.eta_minutes,
-            a.status,
-            ds.code,
-            ds.reason,
-            ds.latitude,
-            ds.longitude,
-            ds.timestamp,
-            ds.priority,
-            ds.first_name,
-            ds.last_name,
-            ds.phone,
-            ds.blood_type,
-            ds.age
-        FROM assignments a
-        JOIN distress_signals ds ON ds.id = a.distress_id
-        WHERE (a.rescuer_id = %s OR a.team_id = %s)
-          AND a.deleted = FALSE
-          AND a.status IN ('assigned', 'en_route')
-        ORDER BY a.assigned_at DESC
-        LIMIT 1
-        """,
-        (user_id, team_id),
-    )
-    return cur.fetchone()
-
-
-def _fetch_latest_active_assignment_global(cur):
-    cur.execute(
-        """
-        SELECT
-            a.id,
-            a.distress_id,
-            a.team_id,
-            a.rescuer_id,
-            a.assigned_at,
-            a.eta_minutes,
-            a.status,
-            ds.code,
-            ds.reason,
-            ds.latitude,
-            ds.longitude,
-            ds.timestamp,
-            ds.priority,
-            ds.first_name,
-            ds.last_name,
-            ds.phone,
-            ds.blood_type,
-            ds.age
-        FROM assignments a
-        JOIN distress_signals ds ON ds.id = a.distress_id
-        WHERE a.deleted = FALSE
-          AND a.status IN ('assigned', 'en_route')
-          AND ds.deleted = FALSE
-          AND ds.status = 'active'
-        ORDER BY a.assigned_at DESC
-        LIMIT 1
-        """
-    )
-    return cur.fetchone()
-
-
-def _fetch_latest_rescuer_location(cur, rescuer_id: int):
-    cur.execute(
-        """
-        SELECT latitude, longitude, recorded_at
-        FROM rescuer_locations
-        WHERE rescuer_id = %s
-        ORDER BY recorded_at DESC
-        LIMIT 1
-        """,
-        (rescuer_id,),
-    )
-    return cur.fetchone()
-
-
-def _build_live_route_response(
-    assignment_row,
-    location_row,
-    route_coordinates,
-    distance_m,
-    duration_s,
-    eta_minutes,
-):
-    (
-        assignment_id,
-        distress_id,
-        assign_team_id,
-        rescuer_id,
-        assigned_at,
-        eta_minutes_db,
-        assignment_status,
-        distress_code,
-        reason,
-        dest_lat,
-        dest_lng,
-        distress_timestamp,
-        priority,
-        first_name,
-        last_name,
-        phone,
-        blood_type,
-        age,
-    ) = assignment_row
-
-    start_lat, start_lng, recorded_at = location_row
-
-    return {
-        "assignment": {
-            "id": assignment_id,
-            "distress_id": distress_id,
-            "team_id": assign_team_id,
-            "rescuer_id": rescuer_id,
-            "assigned_at": assigned_at.isoformat() if assigned_at else None,
-            "eta_minutes": eta_minutes if eta_minutes is not None else eta_minutes_db,
-            "status": assignment_status,
-            "distress": {
-                "code": distress_code,
-                "reason": reason,
-                "latitude": _to_float(dest_lat),
-                "longitude": _to_float(dest_lng),
-                "timestamp": distress_timestamp.isoformat() if distress_timestamp else None,
-                "priority": priority,
-                "user": {
-                    "firstName": first_name,
-                    "lastName": last_name,
-                    "phone": phone,
-                    "bloodType": blood_type,
-                    "age": age,
-                },
-            },
-        },
-        "rescuer_location": {
-            "latitude": _to_float(start_lat),
-            "longitude": _to_float(start_lng),
-            "recorded_at": recorded_at.isoformat() if recorded_at else None,
-        },
-        "route": {
-            "distance_m": distance_m,
-            "duration_s": duration_s,
-            "eta_minutes": eta_minutes,
-            "coordinates": route_coordinates or [],
-        },
-    }
 
 
 @navigation_bp.route("/rescuer/route/live", methods=["GET"])
 @jwt_required()
 def get_live_rescuer_route():
-    """
-    Returns the current rescuer's active assignment route and ETA.
-    Also persists the calculated ETA in the assignments table for offline civilian use.
-    """
     conn = None
     cur = None
 
@@ -265,48 +180,142 @@ def get_live_rescuer_route():
             return jsonify({"error": "Rescuer not found"}), 404
         team_id = user_row[0]
 
-        assignment = _fetch_active_assignment_for_rescuer(cur, user_id, team_id)
+        cur.execute(
+            """
+            SELECT
+                a.id,
+                a.distress_id,
+                a.team_id,
+                a.rescuer_id,
+                a.assigned_at,
+                a.eta_minutes,
+                a.status,
+                ds.code,
+                ds.reason,
+                ds.latitude,
+                ds.longitude,
+                ds.timestamp,
+                ds.priority,
+                ds.first_name,
+                ds.last_name,
+                ds.phone,
+                ds.blood_type,
+                ds.age
+            FROM assignments a
+            JOIN distress_signals ds ON ds.id = a.distress_id
+            WHERE (a.rescuer_id = %s OR a.team_id = %s)
+              AND a.deleted = FALSE
+              AND a.status IN ('assigned', 'en_route')
+            ORDER BY a.assigned_at DESC
+            LIMIT 1
+            """,
+            (user_id, team_id),
+        )
+        assignment = cur.fetchone()
         if not assignment:
             return jsonify({"error": "No active assignment found"}), 404
 
         (
             assignment_id,
             distress_id,
-            _assign_team_id,
-            _rescuer_id,
-            _assigned_at,
-            _eta_minutes_db,
-            _assignment_status,
-            _distress_code,
-            _reason,
+            assign_team_id,
+            rescuer_id,
+            assigned_at,
+            eta_minutes_db,
+            assignment_status,
+            distress_code,
+            reason,
             dest_lat,
             dest_lng,
-            _distress_timestamp,
-            _priority,
-            _first_name,
-            _last_name,
-            _phone,
-            _blood_type,
-            _age,
+            distress_timestamp,
+            priority,
+            first_name,
+            last_name,
+            phone,
+            blood_type,
+            age,
         ) = assignment
 
-        location = _fetch_latest_rescuer_location(cur, user_id)
-        if not location:
-            return jsonify({"error": "Rescuer location not found"}), 400
+        if rescuer_id is None:
+            cur.execute(
+                """
+                UPDATE assignments
+                SET rescuer_id = %s, updated_at = NOW()
+                WHERE id = %s AND rescuer_id IS NULL
+                """,
+                (user_id, assignment_id),
+            )
+            conn.commit()
+            rescuer_id = user_id
+            assignment = (
+                assignment_id,
+                distress_id,
+                assign_team_id,
+                rescuer_id,
+                assigned_at,
+                eta_minutes_db,
+                assignment_status,
+                distress_code,
+                reason,
+                dest_lat,
+                dest_lng,
+                distress_timestamp,
+                priority,
+                first_name,
+                last_name,
+                phone,
+                blood_type,
+                age,
+            )
 
-        if dest_lat is None or dest_lng is None:
-            return jsonify({"error": "Destination coordinates not found"}), 400
+        cur.execute(
+            """
+            SELECT latitude, longitude, recorded_at
+            FROM rescuer_locations
+            WHERE rescuer_id = %s
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (rescuer_id,),
+        )
+        location = cur.fetchone()
+        if not location:
+            payload = _shape_response(
+                assignment_row=assignment,
+                location_row=None,
+                route_coordinates=[],
+                distance_m=None,
+                duration_s=None,
+                eta_minutes=eta_minutes_db,
+            )
+            return jsonify(payload), 200
 
         start_lat, start_lng, _recorded_at = location
-        route_coordinates, distance_m, duration_s, eta_minutes, route_error = _call_ors_route(
-            float(start_lat),
-            float(start_lng),
-            float(dest_lat),
-            float(dest_lng),
+        if dest_lat is None or dest_lng is None:
+            payload = _shape_response(
+                assignment_row=assignment,
+                location_row=location,
+                route_coordinates=[],
+                distance_m=None,
+                duration_s=None,
+                eta_minutes=eta_minutes_db,
+            )
+            return jsonify(payload), 200
+
+        route_coordinates, distance_m, duration_s, eta_minutes, route_err = _route_from_ors(
+            float(start_lat), float(start_lng), float(dest_lat), float(dest_lng)
         )
 
         if route_coordinates is None:
-            return jsonify({"error": "ORS request failed", "details": route_error}), 502
+            payload = _shape_response(
+                assignment_row=assignment,
+                location_row=location,
+                route_coordinates=[],
+                distance_m=None,
+                duration_s=None,
+                eta_minutes=eta_minutes_db,
+            )
+            return jsonify(payload), 200
 
         if eta_minutes is not None:
             cur.execute(
@@ -319,16 +328,15 @@ def get_live_rescuer_route():
             )
             conn.commit()
 
-        return jsonify(
-            _build_live_route_response(
-                assignment,
-                location,
-                route_coordinates,
-                distance_m,
-                duration_s,
-                eta_minutes,
-            )
-        ), 200
+        payload = _shape_response(
+            assignment_row=assignment,
+            location_row=location,
+            route_coordinates=route_coordinates,
+            distance_m=distance_m,
+            duration_s=duration_s,
+            eta_minutes=eta_minutes,
+        )
+        return jsonify(payload), 200
 
     except Exception as e:
         if conn:
@@ -344,61 +352,159 @@ def get_live_rescuer_route():
 @navigation_bp.route("/route/live/public", methods=["GET"])
 @navigation_bp.route("/public/route/live", methods=["GET"])
 def get_public_live_route():
-    """
-    Public: Return the most recent active assignment live route for civilians.
-    No JWT required.
-    """
     conn = None
     cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        assignment = _fetch_latest_active_assignment_global(cur)
+        cur.execute(
+            """
+            SELECT
+                a.id,
+                a.distress_id,
+                a.team_id,
+                a.rescuer_id,
+                a.assigned_at,
+                a.eta_minutes,
+                a.status,
+                ds.code,
+                ds.reason,
+                ds.latitude,
+                ds.longitude,
+                ds.timestamp,
+                ds.priority,
+                ds.first_name,
+                ds.last_name,
+                ds.phone,
+                ds.blood_type,
+                ds.age
+            FROM assignments a
+            JOIN distress_signals ds ON ds.id = a.distress_id
+            WHERE a.deleted = FALSE
+              AND a.status IN ('assigned', 'en_route')
+              AND ds.deleted = FALSE
+              AND ds.status = 'active'
+            ORDER BY a.assigned_at DESC
+            LIMIT 1
+            """
+        )
+        assignment = cur.fetchone()
         if not assignment:
             return jsonify({"error": "No active assignment found"}), 404
 
         (
             assignment_id,
-            _distress_id,
-            _assign_team_id,
+            distress_id,
+            assign_team_id,
             rescuer_id,
-            _assigned_at,
-            _eta_minutes_db,
-            _assignment_status,
-            _distress_code,
-            _reason,
+            assigned_at,
+            eta_minutes_db,
+            assignment_status,
+            distress_code,
+            reason,
             dest_lat,
             dest_lng,
-            _distress_timestamp,
-            _priority,
-            _first_name,
-            _last_name,
-            _phone,
-            _blood_type,
-            _age,
+            distress_timestamp,
+            priority,
+            first_name,
+            last_name,
+            phone,
+            blood_type,
+            age,
         ) = assignment
 
-        if not rescuer_id:
-            return jsonify({"error": "No rescuer assigned"}), 404
+        location = None
 
-        location = _fetch_latest_rescuer_location(cur, rescuer_id)
-        if not location:
-            return jsonify({"error": "Rescuer location not found"}), 404
+        if rescuer_id is not None:
+            cur.execute(
+                """
+                SELECT latitude, longitude, recorded_at
+                FROM rescuer_locations
+                WHERE rescuer_id = %s
+                ORDER BY recorded_at DESC
+                LIMIT 1
+                """,
+                (rescuer_id,),
+            )
+            location = cur.fetchone()
 
-        if dest_lat is None or dest_lng is None:
-            return jsonify({"error": "Destination coordinates not found"}), 400
+        if location is None and assign_team_id is not None:
+            cur.execute(
+                """
+                SELECT rl.latitude, rl.longitude, rl.recorded_at, u.id
+                FROM users u
+                JOIN rescuer_locations rl ON rl.rescuer_id = u.id
+                WHERE u.team_id = %s
+                  AND u.role = 'rescuer'
+                ORDER BY rl.recorded_at DESC
+                LIMIT 1
+                """,
+                (assign_team_id,),
+            )
+            team_row = cur.fetchone()
+            if team_row:
+                location = (team_row[0], team_row[1], team_row[2])
+                if rescuer_id is None:
+                    inferred_rescuer_id = team_row[3]
+                    cur.execute(
+                        """
+                        UPDATE assignments
+                        SET rescuer_id = %s, updated_at = NOW()
+                        WHERE id = %s AND rescuer_id IS NULL
+                        """,
+                        (inferred_rescuer_id, assignment_id),
+                    )
+                    conn.commit()
+                    rescuer_id = inferred_rescuer_id
+                    assignment = (
+                        assignment_id,
+                        distress_id,
+                        assign_team_id,
+                        rescuer_id,
+                        assigned_at,
+                        eta_minutes_db,
+                        assignment_status,
+                        distress_code,
+                        reason,
+                        dest_lat,
+                        dest_lng,
+                        distress_timestamp,
+                        priority,
+                        first_name,
+                        last_name,
+                        phone,
+                        blood_type,
+                        age,
+                    )
+
+        if not location or dest_lat is None or dest_lng is None:
+            payload = _shape_response(
+                assignment_row=assignment,
+                location_row=location,
+                route_coordinates=[],
+                distance_m=None,
+                duration_s=None,
+                eta_minutes=eta_minutes_db,
+            )
+            return jsonify(payload), 200
 
         start_lat, start_lng, _recorded_at = location
-        route_coordinates, distance_m, duration_s, eta_minutes, route_error = _call_ors_route(
-            float(start_lat),
-            float(start_lng),
-            float(dest_lat),
-            float(dest_lng),
+
+        route_coordinates, distance_m, duration_s, eta_minutes, route_err = _route_from_ors(
+            float(start_lat), float(start_lng), float(dest_lat), float(dest_lng)
         )
 
         if route_coordinates is None:
-            return jsonify({"error": "Live route unavailable", "details": route_error}), 503
+            payload = _shape_response(
+                assignment_row=assignment,
+                location_row=location,
+                route_coordinates=[],
+                distance_m=None,
+                duration_s=None,
+                eta_minutes=eta_minutes_db,
+            )
+            return jsonify(payload), 200
 
         if eta_minutes is not None:
             cur.execute(
@@ -411,16 +517,15 @@ def get_public_live_route():
             )
             conn.commit()
 
-        return jsonify(
-            _build_live_route_response(
-                assignment,
-                location,
-                route_coordinates,
-                distance_m,
-                duration_s,
-                eta_minutes,
-            )
-        ), 200
+        payload = _shape_response(
+            assignment_row=assignment,
+            location_row=location,
+            route_coordinates=route_coordinates,
+            distance_m=distance_m,
+            duration_s=duration_s,
+            eta_minutes=eta_minutes,
+        )
+        return jsonify(payload), 200
 
     except Exception as e:
         if conn:
@@ -435,14 +540,12 @@ def get_public_live_route():
 
 @navigation_bp.route("/node/<node_id>/distress/eta", methods=["GET"])
 def get_node_distress_eta(node_id):
-    """Public: Return ETA for the active distress on a given node."""
     conn = None
     cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Supports origin_node_id-based routing.
         cur.execute(
             """
             SELECT id
@@ -490,7 +593,6 @@ def get_node_distress_eta(node_id):
 @navigation_bp.route("/distress/<int:distress_id>/eta", methods=["GET"])
 @navigation_bp.route("/public/distress/<int:distress_id>/eta", methods=["GET"])
 def get_distress_eta(distress_id):
-    """Public: Return ETA for a specific distress ID."""
     conn = None
     cur = None
     try:
