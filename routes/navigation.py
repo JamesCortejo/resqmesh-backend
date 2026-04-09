@@ -29,13 +29,6 @@ def _to_float(value: Any):
 def get_live_rescuer_route():
     """
     Returns the current rescuer's active assignment route and ETA.
-
-    Flow:
-    1) Find the rescuer from JWT
-    2) Find the rescuer's latest active assignment (direct or via team)
-    3) Find the rescuer's latest GPS location
-    4) Call OpenRouteService for the driving route
-    5) Return route geometry and summary data
     """
     conn = None
     cur = None
@@ -241,6 +234,85 @@ def get_live_rescuer_route():
 
     except requests.RequestException as e:
         return jsonify({"error": "Failed to reach ORS", "details": str(e)}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+# -------------------------------------------------------------------
+# PUBLIC ETA ENDPOINTS (no authentication required)
+# -------------------------------------------------------------------
+
+@navigation_bp.route("/node/<node_id>/distress/eta", methods=["GET"])
+def get_node_distress_eta(node_id):
+    """Public: Return ETA for the active distress on a given node."""
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Find active distress on this node
+        cur.execute("""
+            SELECT id FROM distress_signals
+            WHERE origin_node_id = %s AND status = 'active' AND deleted = FALSE
+            LIMIT 1
+        """, (node_id,))
+        distress_row = cur.fetchone()
+        if not distress_row:
+            return jsonify({"eta_minutes": None}), 200
+
+        distress_id = distress_row[0]
+
+        # Find active assignment for this distress
+        cur.execute("""
+            SELECT eta_minutes FROM assignments
+            WHERE distress_id = %s
+              AND status IN ('assigned', 'en_route')
+              AND deleted = FALSE
+            ORDER BY assigned_at DESC
+            LIMIT 1
+        """, (distress_id,))
+        assign_row = cur.fetchone()
+        eta = assign_row[0] if assign_row else None
+
+        return jsonify({"eta_minutes": eta}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@navigation_bp.route("/distress/<int:distress_id>/eta", methods=["GET"])
+def get_distress_eta(distress_id):
+    """Public: Return ETA for a specific distress ID."""
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT eta_minutes FROM assignments
+            WHERE distress_id = %s
+              AND status IN ('assigned', 'en_route')
+              AND deleted = FALSE
+            ORDER BY assigned_at DESC
+            LIMIT 1
+        """, (distress_id,))
+        assign_row = cur.fetchone()
+        eta = assign_row[0] if assign_row else None
+
+        return jsonify({"eta_minutes": eta}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
