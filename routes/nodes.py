@@ -4,7 +4,6 @@ from db import get_db_connection
 nodes_bp = Blueprint("nodes", __name__)
 
 INACTIVE_SECONDS = 180
-DISTRESS_ACTIVE_SECONDS = 3600
 
 
 @nodes_bp.route("/nodes", methods=["GET"])
@@ -44,13 +43,12 @@ def get_nodes():
                 WHERE ds.origin_node_id = n.node_id
                   AND ds.status = 'active'
                   AND ds.deleted = FALSE
-                  AND ds.timestamp > NOW() - INTERVAL '%s seconds'
                 ORDER BY ds.timestamp DESC
                 LIMIT 1
             ) ad ON TRUE
             WHERE n.deleted = FALSE
         """
-        cur.execute(query, (INACTIVE_SECONDS, DISTRESS_ACTIVE_SECONDS))
+        cur.execute(query, (INACTIVE_SECONDS,))
         rows = cur.fetchall()
 
         nodes = []
@@ -112,16 +110,15 @@ def get_node_distress(node_id):
             WHERE origin_node_id = %s
               AND status = 'active'
               AND deleted = FALSE
-              AND timestamp > NOW() - INTERVAL '%s seconds'
             ORDER BY timestamp DESC
             LIMIT 1
             """,
-            (node_id, DISTRESS_ACTIVE_SECONDS),
+            (node_id,),
         )
 
         row = cur.fetchone()
         if not row:
-            return jsonify({"error": "No recent active distress for this node"}), 404
+            return jsonify({"error": "No active distress for this node"}), 404
 
         (
             id_,
